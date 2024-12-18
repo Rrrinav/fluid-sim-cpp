@@ -6,7 +6,7 @@
 
 int get_index(int x, int y, int n) { return x + y * n; }
 
-class FluidCube
+class Fluid_cell
 {
   int size;
   float dt;
@@ -61,6 +61,11 @@ class FluidCube
     lin_solve(b, x, x0, a, 1 + 6 * a);
   }
 
+  void diffuse_vel(int b, float *x, float *x0)
+  {
+    float a = dt * visc * (size - 2) * (size - 2);
+    lin_solve(b, x, x0, a, 1 + 6 * a);
+  }
   void project()
   {
     std::vector<float> div(size * size);
@@ -94,6 +99,51 @@ class FluidCube
     set_bnd(2, Vy.data());
   }
 
+  void compute_curl()
+  {
+    std::vector<float> curl(size * size);
+
+    for (int j = 1; j < size - 1; j++)
+    {
+      for (int i = 1; i < size - 1; i++)
+      {
+        float dVxDy = (Vx[get_index(i, j + 1, size)] - Vx[get_index(i, j - 1, size)]) / (2.0f);  // Removed dt
+        float dVyDx = (Vy[get_index(i + 1, j, size)] - Vy[get_index(i - 1, j, size)]) / (2.0f);  // Removed dt
+
+        curl[get_index(i, j, size)] = dVyDx - dVxDy;
+      }
+    }
+
+    // Calculate average velocity magnitude
+    float avg_velocity_magnitude = 0.0f;
+    for (int i = 0; i < size * size; ++i)
+      avg_velocity_magnitude += std::sqrt(Vx[i] * Vx[i] + Vy[i] * Vy[i]);
+    avg_velocity_magnitude /= (size * size);
+
+    // Scale curl strength based on average velocity magnitude
+    float max_curl_strength = 2.0f;  // Maximum curl strength
+    float min_curl_strength = 0.2f;  // Minimum curl strength
+    float curl_strength = min_curl_strength + (max_curl_strength - min_curl_strength) * (avg_velocity_magnitude);
+    curl_strength = std::min(max_curl_strength, std::max(min_curl_strength, curl_strength));
+
+    for (int j = 1; j < size - 1; j++)
+    {
+      for (int i = 1; i < size - 1; i++)
+      {
+        float dCurlX = (std::abs(curl[get_index(i + 1, j, size)]) - std::abs(curl[get_index(i - 1, j, size)])) / 2.0f;
+        float dCurlY = (std::abs(curl[get_index(i, j + 1, size)]) - std::abs(curl[get_index(i, j - 1, size)])) / 2.0f;
+
+        float length = std::sqrt(dCurlX * dCurlX + dCurlY * dCurlY) + 0.000001f;
+        dCurlX /= length;
+        dCurlY /= length;
+
+        float curlValue = curl[get_index(i, j, size)];
+
+        Vx[get_index(i, j, size)] += curl_strength * dCurlY * curlValue;
+        Vy[get_index(i, j, size)] -= curl_strength * dCurlX * curlValue;
+      }
+    }
+  }
   void advect(int b, float *d, float *d0, float *velocX, float *velocY)
   {
     float dtx = dt * (size - 2);
@@ -127,7 +177,7 @@ class FluidCube
   }
 
 public:
-  FluidCube(int size, float diffusion, float viscosity, float timestep) : size(size), diff(diffusion), visc(viscosity), dt(timestep)
+  Fluid_cell(int size, float diffusion, float viscosity, float timestep) : size(size), diff(diffusion), visc(viscosity), dt(timestep)
   {
     s.resize(size * size);
     density.resize(size * size);
@@ -139,14 +189,14 @@ public:
 
   void step()
   {
-    diffuse(1, Vx0.data(), Vx.data());
-    diffuse(2, Vy0.data(), Vy.data());
+    diffuse_vel(1, Vx0.data(), Vx.data());
+    diffuse_vel(2, Vy0.data(), Vy.data());
 
     project();
 
     advect(1, Vx.data(), Vx0.data(), Vx.data(), Vy.data());
     advect(2, Vy.data(), Vy0.data(), Vx.data(), Vy.data());
-
+    compute_curl();
     project();
 
     diffuse(0, s.data(), density.data());
@@ -181,18 +231,10 @@ public:
       {
         float d = density[get_index(i, j, size)];
 
-        float brightness_g = std::min(d, 1.0f) * 0.8f;  // Adjust factor to 0.8
-        float brightness_b = std::min(d, 1.0f) * 0.5f;  // Adjust factor to 0.8
+        float brightness_g = std::min(d, 1.0f) * 0.8f;
+        float brightness_b = std::min(d, 1.0f) * 0.8f;
         Color cellColor = Color{0, static_cast<unsigned char>(brightness_g * 255), static_cast<unsigned char>(brightness_b * 255), 255};
 
-        // float vx = Vx[get_index(i, j, size)];
-        // float vy = Vy[get_index(i, j, size)];
-        //
-        // float res = std::sqrt(vx * vx + vy * vy);
-        //
-        // float brightness_g = std::min(res, 1.0f) * 0.8f;  // Adjust factor to 0.8
-        // float brightness_b = std::min(res, 1.0f) * 0.5f;  // Adjust factor to 0.8
-        // Color cellColor = Color{0, static_cast<unsigned char>(brightness_g * 255), static_cast<unsigned char>(brightness_b * 255), 255};
         DrawRectangle(i * cellWidth, j * cellHeight, cellWidth, cellHeight, cellColor);
       }
     }
@@ -204,13 +246,12 @@ int main()
   const int screenWidth = 800;
   const int screenHeight = 600;
   const int gridSize = 100;
-  const float density = 0.5;
-  const float vel_factor = 0.5;
+  const float density = 16;
+  const float vel_factor = 1;
 
   InitWindow(screenWidth, screenHeight, "Fluid Simulation - Enhanced");
   SetTargetFPS(60);
-
-  FluidCube fluid(gridSize, 0.000005f, 0.00000001f, 0.2f);
+  Fluid_cell fluid(gridSize, 0.000003f, 0.0000007f, 0.2f);
 
   while (!WindowShouldClose())
   {
@@ -220,60 +261,8 @@ int main()
       int x = static_cast<int>(mousePos.x / (screenWidth / gridSize));
       int y = static_cast<int>(mousePos.y / (screenHeight / gridSize));
 
-      const int brushRadius = 2;  // Radius of the brush in grid cells
-
-      // Loop over a square region around the mouse position
-      for (int offsetY = -brushRadius; offsetY <= brushRadius; ++offsetY)
-      {
-        for (int offsetX = -brushRadius; offsetX <= brushRadius; ++offsetX)
-        {
-          int neighborX = x + offsetX;
-          int neighborY = y + offsetY;
-
-          // Check if the neighboring point is within bounds
-          if (neighborX >= 0 && neighborX < gridSize && neighborY >= 0 && neighborY < gridSize)
-          {
-            // Add density and velocity to the neighboring cell
-            float distance = std::sqrt(offsetX * offsetX + offsetY * offsetY);
-            float influence = std::max(0.0f, 1.0f - (distance / brushRadius));  // Influence decreases with distance
-
-            fluid.add_density(neighborX, neighborY, density * influence);
-            fluid.add_velocity(
-                neighborX, neighborY, GetMouseDelta().x * vel_factor * influence, GetMouseDelta().y * vel_factor * influence);
-          }
-        }
-      }
-    }
-
-    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
-    {
-      Vector2 mousePos = GetMousePosition();
-      int x = static_cast<int>(mousePos.x / (screenWidth / gridSize));
-      int y = static_cast<int>(mousePos.y / (screenHeight / gridSize));
-
-      const int brushRadius = 2;  // Radius of the brush in grid cells
-
-      // Loop over a square region around the mouse position
-      for (int offsetY = -brushRadius; offsetY <= brushRadius; ++offsetY)
-      {
-        for (int offsetX = -brushRadius; offsetX <= brushRadius; ++offsetX)
-        {
-          int neighborX = x + offsetX;
-          int neighborY = y + offsetY;
-
-          // Check if the neighboring point is within bounds
-          if (neighborX >= 0 && neighborX < gridSize && neighborY >= 0 && neighborY < gridSize)
-          {
-            // Add density and velocity to the neighboring cell
-            float distance = std::sqrt(offsetX * offsetX + offsetY * offsetY);
-            float influence = std::max(0.0f, 1.0f - (distance / brushRadius));  // Influence decreases with distance
-
-            //            fluid.add_density(neighborX, neighborY, density * influence);
-            fluid.add_velocity(
-                neighborX, neighborY, GetMouseDelta().x * vel_factor * influence, GetMouseDelta().y * vel_factor * influence);
-          }
-        }
-      }
+      fluid.add_density(x, y, density);
+      fluid.add_velocity(x, y, GetMouseDelta().x * vel_factor, GetMouseDelta().y * vel_factor);
     }
 
     fluid.step();
